@@ -1,0 +1,168 @@
+# .github/workflows/ci.yml
+name: iOS CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '**/*.swift'
+      - '**/*.xib'
+      - '**/*.storyboard'
+      - '*.xcodeproj/**'
+      - '*.xcworkspace/**'
+      - 'Podfile*'
+      - 'Package.swift'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true  # Hủy run cũ khi có push mới
+
+env:
+  SCHEME: "MyApp"
+  PROJECT: "MyApp.xcodeproj"       # hoặc WORKSPACE: "MyApp.xcworkspace"
+  DESTINATION: "platform=iOS Simulator,name=iPhone 16,OS=18.0"
+  XCODE_VERSION: "16.0"
+  DERIVED_DATA: "build/DerivedData"
+
+jobs:
+  # ─── JOB 1: Build & Test ───────────────────────────────────
+  build-and-test:
+    name: 🔨 Build & Test
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      # ── Cache SPM packages ──
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.DERIVED_DATA }}/SourcePackages
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      # ── Cache CocoaPods (nếu dùng) ──
+      # - name: Cache Pods
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: Pods
+      #     key: pods-${{ runner.os }}-${{ hashFiles('Podfile.lock') }}
+      #     restore-keys: pods-${{ runner.os }}-
+      # - name: Install Pods
+      #   run: pod install --repo-update
+
+      # ── Build ──
+      - name: Build
+        run: |
+          xcodebuild build-for-testing \
+            -project "${{ env.PROJECT }}" \
+            -scheme "${{ env.SCHEME }}" \
+            -destination "${{ env.DESTINATION }}" \
+            -derivedDataPath "${{ env.DERIVED_DATA }}" \
+            -enableCodeCoverage YES \
+            -resultBundlePath "build/Build.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions
+
+      # ── Test ──
+      - name: Run Tests
+        run: |
+          xcodebuild test-without-building \
+            -project "${{ env.PROJECT }}" \
+            -scheme "${{ env.SCHEME }}" \
+            -destination "${{ env.DESTINATION }}" \
+            -derivedDataPath "${{ env.DERIVED_DATA }}" \
+            -enableCodeCoverage YES \
+            -resultBundlePath "build/Test.xcresult" \
+            | xcbeautify --renderer github-actions
+
+      # ── Code Coverage Report ──
+      - name: Generate Coverage Report
+        if: success()
+        run: |
+          xcrun xccov view --report --json \
+            "build/Test.xcresult" > build/coverage.json
+
+      - name: Check Minimum Coverage (80%)
+        if: success()
+        run: |
+          COVERAGE=$(python3 -c "
+          import json
+          with open('build/coverage.json') as f:
+              data = json.load(f)
+          # Lấy line coverage tổng
+          print(f'{data[\"lineCoverage\"] * 100:.1f}')
+          ")
+          echo "📊 Code Coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 80.0" | bc -l) )); then
+            echo "::error::Coverage ${COVERAGE}% is below minimum 80%"
+            exit 1
+          fi
+
+      # ── Upload Artifacts ──
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/Test.xcresult
+          retention-days: 7
+
+  # ─── JOB 2: SwiftLint ─────────────────────────────────────
+  lint:
+    name: 🧹 SwiftLint
+    runs-on: macos-15
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run SwiftLint
+        run: |
+          if command -v swiftlint &> /dev/null; then
+            swiftlint lint --reporter github-actions-logging --strict
+          else
+            brew install swiftlint
+            swiftlint lint --reporter github-actions-logging --strict
+          fi
+
+  # ─── JOB 3: Periphery (Dead Code Detection) ───────────────
+  periphery:
+    name: 🔍 Dead Code Check
+    runs-on: macos-15
+    timeout-minutes: 15
+    # Chỉ chạy trên PR, không block merge
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Install Periphery
+        run: brew install peripheryapp/periphery/periphery
+
+      - name: Scan Dead Code
+        run: |
+          periphery scan \
+            --project "${{ env.PROJECT }}" \
+            --schemes "${{ env.SCHEME }}" \
+            --targets "${{ env.SCHEME }}" \
+            --format github-actions
