@@ -105,4 +105,14 @@ final class CalculatorTests: XCTestCase {
             XCTAssertEqual(error, .overflow)
         }
     }
+    
+    // MARK: - Percentage
+
+    func testPercentage() {
+        XCTAssertEqual(sut.percentage(25, of: 100), 25)
+    }
+
+    func testPercentage_ofZero() {
+        XCTAssertEqual(sut.percentage(10, of: 0), 0)
+    }
 }
