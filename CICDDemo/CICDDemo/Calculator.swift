@@ -38,6 +38,12 @@ struct Calculator {
         }
         return .success((1...max(n, 1)).reduce(1, *))
     }
+    
+    // Thêm vào struct Calculator
+    func percentage(_ value: Double, of total: Double) -> Double {
+        guard total != 0 else { return 0 }
+        return (value / total) * 100
+    }
 }
 
 enum CalculatorError: Error, Equatable {
